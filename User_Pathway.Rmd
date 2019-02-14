@@ -1,5 +1,5 @@
 ---
-title: "SafeAuto User Pathways Analysis"
+title: "User Pathways Analysis"
 author: "Meihui (Amelia) Li"
 date: "`r format(Sys.Date(), '%B %d, %Y')`"
 output: 
