@@ -1,0 +1,247 @@
+---
+title: "SafeAuto User Pathways Analysis"
+author: "Meihui (Amelia) Li"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: 
+  rmdformats::readthedown:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: false
+    highlight: tango
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Interactive Dashboard Overview
+#### Analysis details are included in the "User Analysis.rmd" shiny dashboard.
+* Four key events: "Pre-quote", "Quote", "Bind", "Sale".
+* The user performances are analyzed by weekday, hour, device brand, browser, time spent and mobile.
+* Conversion ratios are calculated on event level or session level (labled in the graph titles). Either one can be valid according to specific requirements of different projects. 
+* A significant time-spending difference can be observed between sessions with a purchase and without. Sessions with a purchase spent a relatively longer period with an average of 15 minutes. 
+* For sessions with a purchase, 16% went through the process of "Bind Start - Retrieve Premium" and spent longer time as well. 
+* My guess is that, those people might not be satisfied with the price at first attempt, so they went back and edited some info to try to get a better price. When the premium quote price is acceptable, they will make a purchase.
+
+
+# Pre Processing
+### Load Packages
+
+```{r, warning=FALSE, message=FALSE, results=FALSE}
+# load packages
+Packages <- c("rmdformats", "dplyr", "ggplot2", "lubridate", "shiny", "tidyverse", "klaR", "verification", "ROCR", "reshape2")
+lapply(Packages, library, character.only = TRUE)
+
+# load dataset
+data <- read_csv("https://raw.githubusercontent.com/jasonadki/SafeautoCodingChallenge/master/safeAuto_data_challenge.csv")
+```
+
+
+### Modify Dataset
+
+
+```{r, warning=FALSE, message=FALSE}
+validEvent <- c(
+  "Add Drivers",
+  "Add Vehicles",
+  "Bind Start",
+  "Choose Coverag",
+  "Download Receipt",
+  "Get Premium",
+  "Payment Complete",
+  "Payment Start",
+  "Pre-Quote Portal",
+  "Quote Start",
+  "Referred to Phone Rep",
+  "Retrieve Existing Policy",
+  "Retrieve Premium"
+  )
+
+importantEvent <- c("Pre-Quote Portal",
+                    "Retrieve Premium",
+                    "Bind Start",
+                    "Payment Complete")
+
+# remove user agent string
+newdata <- data[, -4]
+# remove rows with NA
+newdata <- na.omit(newdata, cols = "RecordDateTime")
+# remove rows with event date after 2016-10-13
+newdata <- filter(newdata, RecordDateTime < ymd_hms("2016-10-14 00:00:00"))
+# remove records that repeating the same event
+newdata <- filter(newdata, EventType != 'Client Error')
+# focus on more important events
+newdata <- newdata[which(newdata$Event %in% importantEvent),]
+# correct string in vriable "DeviceBrand"
+newdata[which(newdata$DeviceBrand == 'IPad'), 7] = 'iPad'
+newdata[which(newdata$DeviceBrand == 'IPhone'), 7] = 'iPhone'
+newdata[which(newdata$DeviceBrand == 'iPod touch'), 7] = 'iPod'
+newdata[which(newdata$DeviceBrand == 'IPod'), 7] = 'iPod'
+newdata[which(newdata$DeviceBrand=='Unknown' & newdata$DeviceIsMobile=='TRUE'), 7] = 'Mobile'
+newdata[which(newdata$DeviceBrand == 'Unknown' & newdata$DeviceIsMobile == 'FALSE'), 7] = 'NotMobile'
+newdata[which(newdata$DeviceBrand == 'Windows Phone 10.0'), 7] = 'Win.Phone'
+
+# generate columns "Weekday" and "Hour"
+newdata <- newdata %>%
+  mutate(Weekday = weekdays(RecordDateTime)) %>%
+  mutate(Hour = hour(RecordDateTime))
+
+# generate column "TimePeriod"
+newdata$TimePeriod = 0
+newdata[which(newdata$Hour %in% c(0:6)), 15] = 'Late Night'
+newdata[which(newdata$Hour %in% c(7:12)), 15] = 'Morning'
+newdata[which(newdata$Hour %in% c(13:18)), 15] = 'Afternoon'
+newdata[which(newdata$Hour %in% c(19:23)), 15] = 'Night'
+
+# calculate time spent on each step
+smalldata <- newdata %>%
+  group_by(InteractionId) %>%
+  arrange(RecordDateTime) %>%
+  mutate(diff = RecordDateTime - lag(RecordDateTime, default = first(RecordDateTime))) %>% 
+  mutate(process = paste(lag(Event, default = "Start of Interaction"), "-", Event))
+
+smalldata$diff <- as.numeric(smalldata$diff)
+smalldata <- smalldata %>% 
+  mutate(complete = ifelse(Event == "Payment Complete", 1, 0))
+
+completeCheck <- smalldata %>% 
+  group_by(InteractionId) %>% 
+  summarise(PaymentIsCompleted = sum(complete))
+
+completeCheck[which(completeCheck$PaymentIsCompleted >=1), "PaymentIsCompleted"] = 1
+completeCheck$PaymentIsCompleted <- as.factor(completeCheck$PaymentIsCompleted)
+
+combined <- merge(smalldata, completeCheck, by = "InteractionId", all.x = TRUE)
+
+Total <- combined %>% 
+  group_by(InteractionId) %>% 
+  summarise(TotalTime = sum(diff))
+
+Total <- merge(Total, completeCheck, by = "InteractionId", all.x = TRUE)
+  
+```
+
+
+
+
+# Clustering Analysis
+
+#### K-modes
+
+```{r}
+newdata$score=0
+newdata$score=ifelse(newdata$Event=='Retrieve Premium',1,ifelse(newdata$Event=='Bind Start',2, ifelse(newdata$Event=='Payment Complete',3,0)))
+cludata=newdata%>%group_by(InteractionId)%>%
+  summarise(State=first(State), Browser=first(Browser), Mobile=first(DeviceIsMobile), DeviceBrand=first(DeviceBrand),
+            Time=first(TimePeriod),Event=max(score))
+dis=cludata[,2:6]
+clu=kmodes(dis,2, weighted = F)
+cludata=cludata%>%mutate(cluster=as.factor(clu$cluster))
+cludata$Event=ifelse(cludata$Event==0,'Pre-Quote Portal',ifelse(cludata$Event==1,'Retrieve Premium', ifelse(cludata$Event==2,'Bind Start','Payment Complete')))%>%
+  factor(levels = importantEvent)
+```
+
+
+```{r}
+# plot all data points in two clusters
+ggplot(cludata, aes(as.numeric(row.names(cludata)),as.factor(cludata$Event),color=cludata$cluster))+
+  geom_jitter()
+table(cludata$cluster,cludata$Event)
+table(cludata$cluster)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+Cluster1=prop.table(table(cludata[which(cludata$cluster==1),7]))
+Cluster2=prop.table(table(cludata[which(cludata$cluster==2),7]))
+prop=rbind(Cluster1, Cluster2)%>%as.data.frame()
+prop=t(prop)%>%as.data.frame()
+prop$Event=importantEvent%>%
+  factor(levels = importantEvent)
+# plot conversion ratios of two clusters
+ggplot(prop%>%melt(),aes(x=Event,y=value,fill=variable))+
+  geom_bar(stat = "identity", position = position_dodge(width = 0.5))+
+  ylab('Conversion Rate')
+```
+
+
+
+##### Based on the discrete variables such as State, Device and Time, Kmodes Algorithm segments all sessions into two clusters.
+##### The cluster2 has more data points, while the cluster1 has higher conversion rate regarding Quote & Sales phase.
+
+
+
+# Generalized Linear Model
+
+
+```{r, warning=FALSE, message=FALSE}
+df <- newdata %>% 
+  group_by(InteractionId) %>% 
+  summarise(State = first(State),
+            Weekday = first(Weekday),
+            Hour = first(Hour),
+            DeviceBrand = first(DeviceBrand),
+            Browser = first(Browser))
+
+df$Hour <- as.factor(df$Hour)
+df <- merge(df, completeCheck, by = "InteractionId", all.x = TRUE)
+set.seed(2019)
+subset <- sample(nrow(df), nrow(df) * 0.8)
+df.train = df[subset, -1]
+df.test = df[-subset, -1]
+```
+
+```{r}
+model <- glm(PaymentIsCompleted ~ ., family = binomial(link = 'logit'), data = df.train)
+summary(model)
+```
+
+```{r}
+#in-sample analysis
+prob.glm.insample <- predict(model, df.train, type = "response")
+predicted.glm.insample <- prob.glm.insample > 0.1
+predicted.glm.insample <- as.numeric(predicted.glm.insample)
+table(df.train$PaymentIsCompleted, predicted.glm.insample, dnn = c("Truth", "Predicted"))
+mean(ifelse(df.train$PaymentIsCompleted != predicted.glm.insample, 1, 0))
+# calculate R-squared
+R2 <- (model$null.deviance-model$deviance)/model$null.deviance
+R2
+```
+
+```{r, warning=FALSE, message=FALSE}
+# roc curve
+roc.plot(df.train$PaymentIsCompleted == "1", prob.glm.insample)
+roc.plot(df.train$PaymentIsCompleted == "1", prob.glm.insample)$roc.vol
+```
+
+```{r, warning=FALSE, message=FALSE}
+#out-of-sample analysis
+prob.glm.outsample <- predict(model, df.test, type = "response")
+predicted.glm.outsample <- prob.glm.outsample > 0.1
+predicted.glm.outsample <- as.numeric(predicted.glm.outsample)
+table(df.test$PaymentIsCompleted, predicted.glm.outsample, dnn = c("Truth", "Predicted"))
+mean(ifelse(df.test$PaymentIsCompleted != predicted.glm.outsample, 1, 0))
+```
+
+```{r, warning=FALSE, message=FALSE}
+# roc curve
+roc.plot(df.test$PaymentIsCompleted == "1", prob.glm.outsample)
+roc.plot(df.test$PaymentIsCompleted == "1", prob.glm.outsample)$roc.vol
+```
+
+##### Time, locations, device brands, and browser types do not have statistically significant impact on policy purchase.
+
+
+
+# Future Plans
+
+* I did seasonality analysis only on hour and weekday due to the restriction of data. With more data, we may get more accurate results and also investigate data on monthly or yearly level. 
+* Most of my analysis is about four valid events. More research on other events may reveal meaningful insights.
+* Locations is also an important variable that needed futher investigations.
+* Logistic regression works fine here with 2 classes (IsPurchase). When other classes (e.g. Quote & Bind) are considered, models like SVM or Decision Tree might be much more helpful.
+* Regression Analysis would generate a better performance with other effective variables.
+* More demographic data should be included in order to conduct clustering analysis.
+
