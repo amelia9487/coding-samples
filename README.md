@@ -1,5 +1,5 @@
 ---
-title: "SafeAuto User Pathway"
+title: "User Pathway Analysis"
 output:
   flexdashboard::flex_dashboard:
     vertical_layout: fill
